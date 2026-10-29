@@ -38,7 +38,7 @@ from nltk.stem import PorterStemmer
 
 from common.paths import CorpusPaths
 from common.decisions import DecisionLog
-from common import standalone_report, file_convert, parameter_sweep, resume
+from common import standalone_report, file_convert, llm_client, parameter_sweep, resume
 from phase0.clean_corpus import clean_text
 from phase1 import pipeline as phase1_pipeline
 from phase2 import pipeline as phase2_pipeline, condense, condensation_report
@@ -645,7 +645,7 @@ class PipelineSession:
 
     def apply_phase2_setup(self, top_n, density_percentile, run_condensation,
                             rates_str, ollama_model, max_trials, adversarial_model=None,
-                            title="", authors="", date=""):
+                            title="", authors="", date="", memory_warnings=(), llm_server="ollama"):
         self.decisions2.record(
             step="phase2_setup", decision_type="sentence_selection_config",
             prompt="Phase 2 sentence-selection config",
@@ -678,20 +678,36 @@ class PipelineSession:
             self.max_trials = max_trials
 
             self.decisions2.record(
+                step="condensation_setup", decision_type="llm_server_choice",
+                prompt="Which LLM server would you like to use?",
+                options=list(llm_client.SERVERS), choice=llm_server, extra={"source": "web"},
+            )
+            self.decisions2.record(
                 step="condensation_setup", decision_type="rate_selection",
                 prompt="What condensation rate(s) would you like? (5-30%)",
                 choice=rates_str, extra={"parsed_rates": self.rates, "source": "web"},
             )
             self.decisions2.record(
                 step="condensation_setup", decision_type="ollama_model_choice",
-                prompt="Which Ollama model would you like to use?",
+                prompt="Which model would you like to use?",
                 choice=ollama_model, extra={"source": "web"},
             )
             self.decisions2.record(
                 step="condensation_setup", decision_type="adversarial_model_choice",
-                prompt="Which Ollama model should the adversarial reviewer use?",
+                prompt="Which model should the adversarial reviewer use?",
                 choice=self.adversarial_model, extra={"source": "web"},
             )
+            # LM Studio models the browser flagged as not fitting in free
+            # memory, which the researcher chose to use anyway (the browser
+            # asks before sending them -- same record as the CLI's
+            # condense.confirm_lmstudio_load writes).
+            for warning in memory_warnings:
+                self.decisions2.record(
+                    step="condensation_setup", decision_type="lmstudio_memory_warning",
+                    prompt=f"'{warning.get('model')}' may not fit in free memory. Use this model anyway?",
+                    options=["y", "n"], choice="y",
+                    extra={"source": "web", **warning},
+                )
             self.decisions2.record(
                 step="condensation_setup", decision_type="max_trials_choice",
                 prompt="How many generation trials before asking to escalate?",

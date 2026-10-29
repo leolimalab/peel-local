@@ -34,6 +34,9 @@ numpy
 tqdm
 requests
 
+# LM Studio (common/lmstudio_client.py): free-memory check before a model is loaded
+psutil
+
 # Corpus input conversion (Phase 0 input / webapp upload): PDF text extraction.
 # .txt and .md/.markdown need no extra library -- see common/file_convert.py.
 pypdf

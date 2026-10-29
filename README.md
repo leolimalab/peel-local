@@ -60,7 +60,8 @@ its input from the previous phase's output (see
    sentence in the corpus by lexical density and how many of the
    cluster's stems/n-grams it contains, keeping the top-scoring
    sentences as representative examples. Optionally, it then prompts a
-   locally running LLM (via [Ollama](https://ollama.com)) to condense the
+   locally running LLM (via [Ollama](https://ollama.com) or
+   [LM Studio](https://lmstudio.ai), the researcher's choice) to condense the
    corpus to a chosen target rate; a second LLM pass then audits (and can
    fix) that accepted text -- abrupt endings, garbled sequences, drift
    outside the source material -- before anything downstream reads it;
@@ -124,9 +125,16 @@ WSD/embeddings), `spacy`, `nltk` (core NLP), `hdbscan` (clustering),
 `scipy`, `wordcloud` (Phase 3 distant reading), `numpy`, `tqdm`,
 `requests` (general), and `flask` (the [web interface](#web-interface)).
 
-Phase 2's condensation step also requires [Ollama](https://ollama.com)
-installed separately (not a pip package) -- see
+Phase 2's condensation step also requires a local LLM server installed
+separately (not a pip package): [Ollama](https://ollama.com) (the
+default) or [LM Studio](https://lmstudio.ai) -- see
 [Phase 2 condensation & injection review](#phase-2-condensation--injection-review).
+`psutil` (in `requirements.txt`) is only used to check free memory
+before LM Studio loads a model.
+
+On macOS, delete the `--extra-index-url` line from `requirements.txt`
+before installing -- there is no CUDA build of `torch` for macOS, and
+Phase 1 runs on the CPU there.
 
 Download the spaCy model:
 
@@ -300,14 +308,43 @@ interactive decision point as a form.
 ## Phase 2 condensation & injection review
 
 After selecting informative sentences, Phase 2 can optionally prompt a
-locally running Ollama model to condense the corpus to a target word
-count, then verify that condensation. This requires
-[Ollama](https://ollama.com) installed, a model pulled
-(`ollama pull <model>`, e.g. `llama3`), and `ollama serve` running --
-the config cell checks for it and lists installed models.
+locally running LLM to condense the corpus to a target word count, then
+verify that condensation. You choose the LLM server first -- Ollama (the
+default) or LM Studio -- and both the generation model and the
+adversarial reviewer run on it:
 
-**Generation**: you're prompted for one or more target rates (5-30% of
-the source word count), an Ollama model name, a model for the
+- **Ollama** requires [Ollama](https://ollama.com) installed, a model
+  pulled (`ollama pull <model>`, e.g. `llama3`), and `ollama serve`
+  running.
+- **LM Studio** requires [LM Studio](https://lmstudio.ai) installed, a
+  model downloaded, and its server running (`lms server start`, or the
+  Developer tab in the app). Its models are stored and logged with an
+  `lmstudio:` prefix (e.g. `lmstudio:qwen/qwen3.5-9b`), so a decision log
+  always says which server produced a text; you type or pick them
+  without it. LM Studio loads a model that isn't loaded yet on its first
+  request, so before that happens the pipeline compares the model's size
+  (plus ~20% for the KV cache and runtime) against the memory free right
+  now, and **asks before using a model that may not fit** (an answer
+  logged as `lmstudio_memory_warning`). An already-loaded model keeps the
+  context length it was loaded with: a prompt that doesn't fit is
+  refused before sending, and a response that fills the whole context
+  raises an error instead of being used, since it may have been cut
+  short -- reload the model with a larger context length in that case.
+  Generation turns the model's reasoning off when the model supports
+  that (LM Studio's equivalent of Ollama's `think: false`). **LM Studio
+  models are used one at a time**: with a different model for the
+  adversarial reviewer, the pipeline uses the generation model, unloads
+  it, then loads and uses the reviewer -- and unloads the reviewer again
+  before the next rate's generation -- so the two never sit in memory
+  together (the memory check for the reviewer counts the generation
+  model's memory as freed). Only models the pipeline itself used are
+  unloaded; anything else loaded in LM Studio is left alone.
+
+The config cell checks the chosen server and lists its models (for LM
+Studio: loaded or not, size, and whether it fits in free memory).
+
+**Generation**: you're prompted for the LLM server, one or more target
+rates (5-30% of the source word count), a model name, a model for the
 adversarial reviewer below (ENTER to reuse the generation model), and a
 maximum number of generation trials. Generation always runs with
 `repeat_penalty: 1.0`
@@ -602,9 +639,12 @@ shown or used, since nothing references the old session anymore.
 5. **Cluster review** -- one card per cluster: editable name, and a
    checkbox per stem and n-gram (uncheck to remove).
 6. **Phase 2 setup** -- `top_n`/density-percentile fields, a "generate a
-   condensation?" Yes/No toggle, and (if yes) rate(s), an Ollama model
-   dropdown and a separate adversarial-reviewer model dropdown (both
-   populated live from Ollama, with an availability check), max trials,
+   condensation?" Yes/No toggle, and (if yes) rate(s), an LLM server
+   dropdown (Ollama, the default, or LM Studio), a model dropdown and a
+   separate adversarial-reviewer model dropdown (both populated live from
+   the chosen server, with an availability check; LM Studio's list puts
+   loaded models first, shows each other model's size, and warns -- and
+   asks before using it -- when a model may not fit in free memory), max trials,
    and the source's title/author(s)/date -- three optional text fields,
    or a checkbox to have the model determine them instead.
 7. **Escalation** (only if triggered) -- per rate that missed its target
@@ -769,7 +809,7 @@ peel-local/
 ├── requirements.txt
 ├── .gitignore
 ├── common/            # shared modules: data-directory contract, decision log,
-│                       # Ollama client, standalone report, Phase 1 parameter sweep
+│                       # Ollama/LM Studio clients, standalone report, Phase 1 parameter sweep
 ├── phase0/            # phase0.ipynb + clean_corpus.py -- corpus cleaning
 ├── phase1/            # phase1.ipynb + pipeline.py -- stems, WSD, clustering
 ├── phase2/            # phase2.ipynb + pipeline.py (sentence selection) +

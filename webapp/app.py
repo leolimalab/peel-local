@@ -28,7 +28,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from flask import Flask, jsonify, request, send_file, send_from_directory
 
-from common import ollama_client, resume
+from common import lmstudio_client, ollama_client, resume
 from common.paths import CorpusPaths
 from webapp.pipeline_session import PipelineSession
 
@@ -262,9 +262,11 @@ def decide_phase2_setup():
             density_percentile=float(body.get("density_percentile", 75)),
             run_condensation=bool(body.get("run_condensation", False)),
             rates_str=body.get("rates", ""),
+            llm_server=body.get("llm_server", "ollama"),
             ollama_model=body.get("ollama_model", ""),
             adversarial_model=body.get("adversarial_model", ""),
             max_trials=int(body.get("max_trials", 3)),
+            memory_warnings=body.get("memory_warnings") or [],
             title=body.get("title", ""),
             authors=body.get("authors", ""),
             date=body.get("date", ""),
@@ -400,6 +402,20 @@ def ollama_models():
         models = ollama_client.list_models() if available else []
         return jsonify({"available": available, "models": models})
     except ollama_client.OllamaError as e:
+        return jsonify({"available": False, "models": [], "error": str(e)})
+
+
+@app.route("/api/lmstudio/models")
+def lmstudio_models():
+    """Same idea as /api/ollama/models, but each model is a dict (see
+    lmstudio_client.list_models) carrying whether it's loaded and, if not,
+    whether it fits in the memory free right now -- the setup screen warns
+    before a not-loaded model gets picked."""
+    try:
+        available = lmstudio_client.is_available()
+        models = lmstudio_client.list_models() if available else []
+        return jsonify({"available": available, "models": models})
+    except lmstudio_client.LMStudioError as e:
         return jsonify({"available": False, "models": [], "error": str(e)})
 
 

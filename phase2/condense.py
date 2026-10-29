@@ -33,7 +33,7 @@ from collections import Counter
 
 from sentence_transformers import SentenceTransformer
 
-from common import ollama_client
+from common import llm_client, lmstudio_client, ollama_client
 from phase2.condensation_report import parse_condensed_blocks
 
 FUNCTION_WORD_SET = {
@@ -341,8 +341,8 @@ def run_adversarial_review(condensed_text, ordered_sentences, target_words, corp
     prompt = build_adversarial_review_prompt(condensed_text, ordered_sentences, target_words, corpus_name)
 
     try:
-        response = ollama_client.generate(adversarial_model, prompt, host=host, timeout=timeout, think=False)
-    except ollama_client.OllamaError as e:
+        response = llm_client.generate(adversarial_model, prompt, host=host, timeout=timeout, think=False)
+    except llm_client.LLMError as e:
         decisions.record(
             step="condensation_generation", decision_type="adversarial_review_result",
             prompt="Adversarial reviewer check on accepted condensation",
@@ -449,8 +449,8 @@ def attempt_condensation_trials(ordered_sentences, cluster_key_terms, target_wor
         # whatever non-1.0 default the model's own Modelfile applies, so
         # no implicit anti-repetition bias suppresses legitimate reuse of
         # source/cluster key terms the condensation is supposed to preserve.
-        text = ollama_client.generate(model, prompt, host=host, timeout=timeout,
-                                       options={"num_ctx": num_ctx, "repeat_penalty": 1.0}, think=False)
+        text = llm_client.generate(model, prompt, host=host, timeout=timeout,
+                                    options={"num_ctx": num_ctx, "repeat_penalty": 1.0}, think=False)
         word_count = count_words(text)
         diff = abs(word_count - target_words)
         within_tolerance = diff <= tolerance * target_words
@@ -584,7 +584,7 @@ def extract_source_metadata(source_text, model, embedder_name="all-MiniLM-L6-v2"
         "DATE: <the publication date, or Unclear>\n"
         "If you are not reasonably confident about a field, write Unclear for it -- do not guess."
     )
-    response = ollama_client.generate(model, prompt, host=host, think=False)
+    response = llm_client.generate(model, prompt, host=host, think=False)
     return _parse_source_metadata_response(response)
 
 
@@ -624,13 +624,82 @@ def run_source_metadata_setup(decisions, source_text, ollama_model, host=ollama_
     return title, authors, date
 
 
-def run_condensation_setup(decisions, host=ollama_client.DEFAULT_HOST):
-    """Interactive condensation setup: Ollama availability check plus the
-    rate(s)/model/max-trials prompts. Every choice is appended to the
-    decisions log via `decisions.record(...)` for later audit -- it does
-    not change the interactive flow. Shared by phase2.ipynb and
-    run_pipeline.py so there's one implementation, not two. Returns
-    (rates, ollama_model, max_trials, adversarial_model)."""
+def confirm_lmstudio_load(model, decisions, role="generation", unload_first=()):
+    """Interactive: for an LM Studio model that isn't loaded yet and that
+    lmstudio_client.check_memory flags as risky to load (not enough free
+    memory), prints why and asks whether to use it anyway. Ollama models,
+    already-loaded LM Studio models, and ones that fit return True without
+    asking. `unload_first`: models lmstudio_client.generate will have
+    unloaded before this one loads (the generation model, for a different
+    adversarial reviewer), whose memory counts as free. The answer is
+    appended to the decisions log. Returns True to keep the model, False
+    to pick another."""
+    if not llm_client.is_lmstudio_model(model):
+        return True
+    try:
+        info = lmstudio_client.describe_model(model, unload_first=unload_first)
+    except lmstudio_client.LMStudioError as e:
+        print(f"Could not check '{model}' in LM Studio: {e}")
+        return False
+    if info["memory"]["ok"]:
+        return True
+
+    print(f"\nWARNING: '{model}' is {info['memory']['message']}.")
+    answer = input("Use this model anyway? (y/n): ").strip().lower()
+    decisions.record(
+        step="condensation_setup", decision_type="lmstudio_memory_warning",
+        prompt=f"'{model}' may not fit in free memory. Use this model anyway?",
+        options=["y", "n"], choice=answer,
+        extra={"model": model, "role": role, **info["memory"]},
+    )
+    return answer == "y"
+
+
+def choose_llm_server(decisions):
+    """Interactive: which local server runs the condensation and
+    adversarial-review models -- Ollama (ENTER, the default) or LM Studio.
+    Logged as an "llm_server_choice" decision. Returns "ollama" or
+    "lmstudio" (llm_client.SERVERS)."""
+    while True:
+        server = input(
+            "\nWhich LLM server would you like to use? (ollama / lmstudio, ENTER for ollama): "
+        ).strip().lower() or "ollama"
+        if server in llm_client.SERVERS:
+            break
+        print(f"Please answer one of: {', '.join(llm_client.SERVERS)}.")
+
+    decisions.record(
+        step="condensation_setup", decision_type="llm_server_choice",
+        prompt="Which LLM server would you like to use?",
+        options=list(llm_client.SERVERS), choice=server,
+    )
+    return server
+
+
+def print_available_models(server="ollama", host=ollama_client.DEFAULT_HOST):
+    """Lists the models the chosen server offers: Ollama's installed
+    models, or LM Studio's downloaded ones with whether each is loaded
+    and, if not, whether it fits in free memory."""
+    if server == "lmstudio":
+        if not lmstudio_client.is_available():
+            print(
+                f"LM Studio does not appear to be running at {lmstudio_client.DEFAULT_HOST}.\n"
+                "Install it from https://lmstudio.ai, download a model, and start its server "
+                "(`lms server start`), then re-run this cell."
+            )
+            return
+        print("LM Studio is available. Downloaded models:")
+        for info in lmstudio_client.list_models():
+            if info["loaded"]:
+                status = f"loaded, context {info['context_length']} tokens"
+            elif info["memory"]["ok"]:
+                status = f"not loaded, {info['size_gb']} GB -- fits in free memory"
+            else:
+                status = (f"not loaded, {info['size_gb']} GB -- WARNING: may not fit in free memory "
+                          f"({info['memory']['available_gb']} GB free)")
+            print(f"  - {lmstudio_client.model_key(info['name'])}  ({status})")
+        return
+
     if not ollama_client.is_available(host=host):
         print(
             f"Ollama does not appear to be running at {host}.\n"
@@ -641,6 +710,21 @@ def run_condensation_setup(decisions, host=ollama_client.DEFAULT_HOST):
         print("Ollama is available. Installed models:")
         for name in ollama_client.list_models(host=host):
             print(f"  - {name}")
+
+
+def run_condensation_setup(decisions, host=ollama_client.DEFAULT_HOST, server=None):
+    """Interactive condensation setup: LLM server choice (Ollama or LM
+    Studio) and availability check, plus the rate(s)/model/max-trials
+    prompts. Every choice is appended to the decisions log via
+    `decisions.record(...)` for later audit -- it does not change the
+    interactive flow. Shared by phase2.ipynb and run_pipeline.py so
+    there's one implementation, not two. `server`, if given (e.g.
+    run_pipeline.py's --llm-server), skips the server question. Returns
+    (rates, ollama_model, max_trials, adversarial_model); with LM Studio
+    both models come back "lmstudio:"-prefixed (see common/llm_client.py)."""
+    if server is None:
+        server = choose_llm_server(decisions)
+    print_available_models(server=server, host=host)
 
     rate_input = input(
         "\nWhat condensation rate(s) would you like? (5-30%, comma-separated for multiple, e.g. '10,20'): "
@@ -653,21 +737,28 @@ def run_condensation_setup(decisions, host=ollama_client.DEFAULT_HOST):
         choice=rate_input, extra={"parsed_rates": rates},
     )
 
-    ollama_model = input("\nWhich Ollama model would you like to use? ").strip()
+    while True:
+        ollama_model = llm_client.qualify_model(input("\nWhich model would you like to use? ").strip(), server)
+        if confirm_lmstudio_load(ollama_model, decisions, role="generation"):
+            break
 
     decisions.record(
         step="condensation_setup", decision_type="ollama_model_choice",
-        prompt="Which Ollama model would you like to use?", choice=ollama_model,
+        prompt="Which model would you like to use?", choice=ollama_model,
     )
 
-    adversarial_model = input(
-        f"\nWhich Ollama model should the adversarial reviewer use? "
-        f"(ENTER to reuse '{ollama_model}'): "
-    ).strip() or ollama_model
+    while True:
+        adversarial_model = llm_client.qualify_model(input(
+            f"\nWhich model should the adversarial reviewer use? "
+            f"(ENTER to reuse '{ollama_model}'): "
+        ).strip(), server) or ollama_model
+        if adversarial_model == ollama_model or confirm_lmstudio_load(
+                adversarial_model, decisions, role="adversarial_review", unload_first=[ollama_model]):
+            break
 
     decisions.record(
         step="condensation_setup", decision_type="adversarial_model_choice",
-        prompt="Which Ollama model should the adversarial reviewer use?", choice=adversarial_model,
+        prompt="Which model should the adversarial reviewer use?", choice=adversarial_model,
     )
 
     max_trials = int(input("\nHow many generation trials before asking to escalate? ").strip())

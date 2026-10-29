@@ -47,7 +47,38 @@ Minimal wrapper for a locally running [Ollama](https://ollama.com) instance.
 |---|---|---|
 | `is_available(host=, timeout=)` | `True` if Ollama responds at all | `condense.py::run_condensation_setup` |
 | `list_models(host=, timeout=)` | Installed model names | `condense.py::run_condensation_setup` |
-| `generate(model, prompt, host=, timeout=)` | Blocking, non-streaming `/api/generate` call; raises `OllamaError` on failure | `condense.py::attempt_condensation_trials`, `condense.py::run_adversarial_review`, `condense.py::extract_source_metadata` |
+| `generate(model, prompt, host=, timeout=)` | Blocking, non-streaming `/api/generate` call; raises `OllamaError` on failure | `llm_client.generate` |
+
+## `common/lmstudio_client.py`
+
+Minimal wrapper for a locally running [LM Studio](https://lmstudio.ai)
+server (default `http://localhost:1234`), through its native REST API
+(`/api/v1`). Model names carry an `lmstudio:` prefix everywhere outside
+this module.
+
+| Function | Purpose | Called from |
+|---|---|---|
+| `model_key(model)` | Strips the `lmstudio:` prefix (LM Studio's own model id) | Throughout this module, `condense.py::print_available_models` |
+| `check_memory(entry, models, unload_first=)` | For a not-loaded model: its size x `LOAD_OVERHEAD` (1.2) plus `HEADROOM_BYTES` (2 GB) vs. free memory (`psutil`), counting loaded `unload_first` models as freed; returns `{"ok", "message", "required_gb", "available_gb", "headroom_gb"}`, naming other loaded models when it doesn't fit. A loaded model is always ok | `list_models`, `describe_model`, `generate` |
+| `unload_model(key, host=, timeout=, models=)` | Unloads every loaded instance of a model (`POST /api/v1/models/unload`); raises `LMStudioError` on failure | `_unload_other_used_models` |
+| `_unload_other_used_models(key, models, host)` | One LM Studio model at a time: before a request to `key`, unloads every other model this process has sent requests to (`_used_keys`) that is still loaded; models it never used are left alone | `generate` |
+| `is_available(host=, timeout=)` | `True` if `GET /api/v1/models` answers 200 | `condense.py::print_available_models`, webapp `/api/lmstudio/models` |
+| `list_models(host=, timeout=)` | Downloaded LLMs as dicts (`name` prefixed, `display_name`, `size_gb`, `loaded`, `context_length`, `memory`), loaded first | Same |
+| `describe_model(model, host=, timeout=, unload_first=)` | `list_models`' dict for one model (memory check crediting `unload_first`); raises `LMStudioError` if it isn't downloaded | `condense.py::confirm_lmstudio_load` |
+| `generate(model, prompt, host=, timeout=, options=, think=)` | Blocking `POST /api/v1/chat` (`store: false`), same contract as `ollama_client.generate`. First unloads any other model this process used (`_unload_other_used_models`). For a not-loaded model, prints its memory check and sends `context_length` = max(`JIT_MIN_CONTEXT` 32768, 2 x `num_ctx`), capped at the model's maximum, passes `repeat_penalty`/sampling options through, maps `think` to `reasoning` when the model supports it. Refuses a prompt estimated not to fit an already-loaded model's context, and raises when input + output tokens fill the context (possible truncation). Raises `LMStudioError` | `llm_client.generate` |
+
+## `common/llm_client.py`
+
+Routes Phase 2's LLM calls by model name: `lmstudio:`-prefixed names to
+`lmstudio_client`, every other name to `ollama_client` (unchanged).
+
+| Function / name | Purpose | Called from |
+|---|---|---|
+| `LLMError` | Tuple `(OllamaError, LMStudioError)`, for `except` clauses | `condense.py::run_adversarial_review` |
+| `SERVERS` | `("ollama", "lmstudio")` -- the researcher's server choice, Ollama first (default) | `condense.py::choose_llm_server`, `run_pipeline.py --llm-server`, `webapp/pipeline_session.py` |
+| `is_lmstudio_model(model)` / `server_of(model)` | Which server a stored model name belongs to | `condense.py::confirm_lmstudio_load`, `run_pipeline.py::resolve_condensation_config` |
+| `qualify_model(model, server)` | Adds the `lmstudio:` prefix for LM Studio when missing | `condense.py::run_condensation_setup`, `run_pipeline.py::resolve_condensation_config` |
+| `generate(model, prompt, host=, timeout=, options=, think=)` | Dispatches to the right client; `host` is Ollama's | `condense.py::attempt_condensation_trials`, `condense.py::run_adversarial_review`, `condense.py::extract_source_metadata` |
 
 ## `common/standalone_report.py`
 
@@ -219,8 +250,11 @@ are **interactive**. See README's condensation section for the taxonomy.
 | `_check_repeated_ngram(condensed_text, n=, min_repeats=)` | Flags an exact `n`-word phrase (default 6) repeated `min_repeats`+ times | Same |
 | `check_condensation_sanity(condensed_text, ordered_sentences)` | Runs all three checks above; returns a list of issue descriptions (empty if clean) | `attempt_condensation_trials`, report builders |
 | `format_trial_line(t, prefix=)` | One console/log line for a generation trial (word count + any sanity issues) -- shared so `run_pipeline.py`/`webapp` don't re-derive the format | `run_generate_for_rate` and its CLI/webapp equivalents |
-| `attempt_condensation_trials(..., model, max_trials, include_full_text, ...)` | Up to `max_trials` generation attempts against Ollama (`repeat_penalty: 1.0`, `think: False`), no `input()`. Each trial is checked against both word-count tolerance and `check_condensation_sanity`; a trial only short-circuits as success when both pass. Returns `{"text", "trials", "success", "soft_accept", "sanity_failed"}` -- falls back to the closest sane trial, or, only if every trial failed sanity, the closest trial overall (tagged `sanity_failed: True`), rather than ever discarding output silently | `run_generate_for_rate` |
-| **`run_condensation_setup(decisions, host=)`** (interactive) | Ollama availability check + rate(s)/model/adversarial-reviewer-model (defaults to the generation model on ENTER)/max-trials prompts; returns `(rates, ollama_model, max_trials, adversarial_model)` | phase2.ipynb, `run_pipeline.py::resolve_condensation_config` |
+| `attempt_condensation_trials(..., model, max_trials, include_full_text, ...)` | Up to `max_trials` generation attempts against Ollama or LM Studio via `llm_client.generate` (`repeat_penalty: 1.0`, `think: False`), no `input()`. Each trial is checked against both word-count tolerance and `check_condensation_sanity`; a trial only short-circuits as success when both pass. Returns `{"text", "trials", "success", "soft_accept", "sanity_failed"}` -- falls back to the closest sane trial, or, only if every trial failed sanity, the closest trial overall (tagged `sanity_failed: True`), rather than ever discarding output silently | `run_generate_for_rate` |
+| **`choose_llm_server(decisions)`** (interactive) | Asks Ollama (ENTER, default) or LM Studio; logs `llm_server_choice` | `run_condensation_setup` |
+| `print_available_models(server=, host=)` | Availability check + model list for the chosen server (LM Studio: loaded or not, size, fits in free memory) | `run_condensation_setup` |
+| **`confirm_lmstudio_load(model, decisions, role=, unload_first=)`** (interactive) | For a not-loaded LM Studio model that may not fit in free memory (counting `unload_first` -- the generation model, for a different reviewer -- as freed): prints why and asks y/n, logging `lmstudio_memory_warning`; returns `True` without asking otherwise | `run_condensation_setup`, `run_pipeline.py::resolve_condensation_config` |
+| **`run_condensation_setup(decisions, host=, server=)`** (interactive) | LLM server choice (skipped if `server` given) + availability check + rate(s)/model/adversarial-reviewer-model (defaults to the generation model on ENTER)/max-trials prompts; LM Studio names get the `lmstudio:` prefix; returns `(rates, ollama_model, max_trials, adversarial_model)` | phase2.ipynb, `run_pipeline.py::resolve_condensation_config` |
 | **`run_generate_for_rate(rate, ..., decisions, host=)`** (interactive) | Non-escalated trials, then the escalation prompt/retry if needed | phase2.ipynb, `run_pipeline.py::run_phase2` |
 | `build_adversarial_review_prompt(condensed_text, ordered_sentences, target_words, corpus_name)` | Builds the adversarial-reviewer prompt: checks for an abrupt ending, garbled/nonsensical sequences, or drift outside the informative-sentence pool; asks for a fixed `VERDICT: OK` / `VERDICT: FIXED`+`ISSUES:`+`TEXT:` response | `run_adversarial_review` |
 | `parse_adversarial_response(response_text)` | Parses that structured response; returns `(verdict, issues, fixed_text)`, `"UNPARSEABLE"` if the model didn't follow the format | `run_adversarial_review` |
@@ -370,9 +404,9 @@ report export on one new corpus in a single script -- see README's
 
 | Function | Purpose |
 |---|---|
-| `parse_args()` | CLI flags: `--corpus`, `--input`, `--clean`, `--start-phase` (`1`/`2`/`3`, default `1`), `--list-corpora`, one flag per notebook config constant, `--merge-duplicate-word-occurrences`, `--sweep` (Phase 1 parameter-sweep opt-in), optional `--rates`/`--ollama-model`/`--adversarial-model`/`--max-trials`. `--corpus`/`--input` are no longer unconditionally `required=True` -- validated in `main()` instead, since whether `--input` is required (and `--corpus` at all, given `--list-corpora`) depends on `--start-phase` |
+| `parse_args()` | CLI flags: `--corpus`, `--input`, `--clean`, `--start-phase` (`1`/`2`/`3`, default `1`), `--list-corpora`, one flag per notebook config constant, `--merge-duplicate-word-occurrences`, `--sweep` (Phase 1 parameter-sweep opt-in), optional `--rates`/`--llm-server`/`--ollama-model` (alias `--model`)/`--adversarial-model`/`--max-trials`. `--corpus`/`--input` are no longer unconditionally `required=True` -- validated in `main()` instead, since whether `--input` is required (and `--corpus` at all, given `--list-corpora`) depends on `--start-phase` |
 | `place_raw_text(args, paths)` | Copies `--input` to `paths.raw_txt()`, or runs `clean_corpus.clean_text` first if `--clean`. Only called for `--start-phase 1` |
-| `resolve_condensation_config(args, decisions)` | Uses CLI condensation flags if `--rates`/`--ollama-model`/`--max-trials` are all given (`--adversarial-model` optional even then, defaults to `--ollama-model`; logged with `"source": "cli"`); else falls back to `condense.run_condensation_setup` |
+| `resolve_condensation_config(args, decisions)` | Uses CLI condensation flags if `--rates`/`--ollama-model`/`--max-trials` are all given (`--adversarial-model` optional even then, defaults to `--ollama-model`; `--llm-server` defaults to Ollama, or LM Studio for an `lmstudio:`-prefixed model; a not-loaded LM Studio model that may not fit in free memory still asks y/n; logged with `"source": "cli"`); else falls back to `condense.run_condensation_setup`, passing `--llm-server` through |
 | `run_phase1(args, paths, decisions)` | Mirrors `phase1.ipynb` cell-by-cell -- including, if `--sweep` is given, `common.parameter_sweep.run_parameter_sweep_setup` right before stem extraction; returns `(phase1_state, nlp, stemmer, text)` |
 | `run_phase2(args, paths, decisions, phase1_state, nlp, stemmer, text, original_text)` | Mirrors `phase2.ipynb` cell-by-cell, plus `condense.run_source_metadata_setup`, `condense.run_adversarial_review` per rate (right before `process_and_save_rate`), `run_phase3` (right after the initial rates' reports are built), and the post-completion regeneration loop (`run_regeneration_loop`) -- none of which the notebook has. Reached from `--start-phase` 1 or 2 |
 | `run_phase3(args, paths, phase1_state, nlp, stemmer, text, condensed_texts)` | No notebook equivalent. Builds the Phase 3 context, runs `collocations.run_collocation_review` if there's a condensation to compare against, and writes the distant-reading report -- own `DecisionLog(phase="phase3")`. Reached from `--start-phase` 1, 2 (via `run_phase2`), or 3 (called directly) |

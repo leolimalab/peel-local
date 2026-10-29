@@ -20,8 +20,11 @@ if you'd rather drive this through a browser instead of a terminal.
 - `python -m spacy download en_core_web_sm`
 - A GPU is recommended for Phase 1 (GlossBERT + embeddings); CPU works
   but is slow.
-- For condensation: [Ollama](https://ollama.com) installed, a model
-  pulled (`ollama pull <model>`), and `ollama serve` running.
+- For condensation, one local LLM server:
+  - [Ollama](https://ollama.com) (the default): installed, a model
+    pulled (`ollama pull <model>`), and `ollama serve` running; or
+  - [LM Studio](https://lmstudio.ai): installed, a model downloaded, and
+    its server running (`lms server start`).
 
 See README.md's "Installation" section for the full setup.
 
@@ -50,17 +53,29 @@ See README.md's "Installation" section for the full setup.
 | `--top-n` | `10` | Informative sentences kept per Phase 1 cluster |
 | `--density-percentile` | `75` | Lexical-density percentile threshold |
 | `--rates` | *(prompted)* | Comma-separated condensation rate(s), e.g. `10,20` |
-| `--ollama-model` | *(prompted)* | Ollama model name for condensation |
-| `--adversarial-model` | `--ollama-model`'s value | Ollama model for the post-generation adversarial reviewer (audits/fixes the accepted condensation before it's saved) -- optional even when `--rates`/`--ollama-model`/`--max-trials` are all given |
+| `--llm-server` | `ollama` (*prompted* in interactive setup) | Local LLM server for condensation and the adversarial reviewer: `ollama` or `lmstudio` |
+| `--ollama-model` (alias `--model`) | *(prompted)* | Model name for condensation, as the `--llm-server` names it (e.g. `llama3` for Ollama, `qwen/qwen3.5-9b` for LM Studio) |
+| `--adversarial-model` | `--ollama-model`'s value | Model for the post-generation adversarial reviewer (audits/fixes the accepted condensation before it's saved), on the same server -- optional even when `--rates`/`--ollama-model`/`--max-trials` are all given |
 | `--max-trials` | *(prompted)* | Max generation trials per rate before escalation |
 
 `--rates`/`--ollama-model`/`--max-trials` are a set: give **all three**
 to skip the interactive condensation-setup prompt entirely; omit any of
-them and you'll be prompted for all three interactively (plus the
-adversarial-reviewer model), exactly like `phase2.ipynb`'s
-condensation-config cell. Either way the choice is logged to
+them and you'll be prompted for all three interactively (plus the LLM
+server, unless `--llm-server` is given, and the adversarial-reviewer
+model), exactly like `phase2.ipynb`'s condensation-config cell. Either
+way the choice is logged to
 `data/<corpus>/decisions/phase2_decisions.jsonl` (with `extra.source` set
 to `"cli"` or the interactive prompt's own record, respectively).
+
+With `--llm-server lmstudio`, model names are stored with an `lmstudio:`
+prefix (e.g. `lmstudio:qwen/qwen3.5-9b`); passing a prefixed
+`--ollama-model` without `--llm-server` selects LM Studio too. If a
+chosen LM Studio model isn't loaded yet and may not fit in free memory,
+you're asked whether to use it anyway even in flags mode -- answering
+`n` stops the run before anything is loaded. With a different LM Studio
+model for `--adversarial-model`, the two are used one at a time: the
+generation model is unloaded before the reviewer loads (and the reviewer
+before the next generation), so they're never in memory together.
 
 ## Walkthroughs
 
@@ -107,6 +122,10 @@ sections removed), then proceeds as above using the cleaned text.
 ```bash
 python run_pipeline.py --corpus Boisseau --input path/to/Boisseau.txt \
   --rates 10,20 --ollama-model llama3 --max-trials 3
+
+# same, with a model served by LM Studio
+python run_pipeline.py --corpus Boisseau --input path/to/Boisseau.txt \
+  --rates 10,20 --llm-server lmstudio --model qwen/qwen3.5-9b --max-trials 3
 ```
 
 Skips the condensation-setup prompt (rates/model/trials are already
@@ -171,9 +190,11 @@ In order, when they appear:
 3. **Cluster review** (Phase 1, after clustering + n-gram mining) --
    per cluster: accept as-is, or rename/remove stems/remove n-grams.
 4. **Condensation setup** (Phase 2) -- only if `--rates`/`--ollama-model`/
-   `--max-trials` weren't all given on the command line: rate(s), Ollama
-   model, adversarial-reviewer model (ENTER to reuse the generation
-   model), max trials.
+   `--max-trials` weren't all given on the command line: LLM server
+   (Ollama or LM Studio, ENTER for Ollama), rate(s), model,
+   adversarial-reviewer model (ENTER to reuse the generation model), max
+   trials. An LM Studio model that isn't loaded and may not fit in free
+   memory asks for confirmation first.
 5. **Escalation** (Phase 2, per rate, only if trials miss the target) --
    retry with the full source text included in the prompt?
 6. **Borderline classification review** (Phase 2, only if any F/T spans
@@ -222,6 +243,17 @@ per rate), `phase3/` (the single distant-reading report HTML), and
   [Ollama](https://ollama.com), run `ollama pull <model>`, and make sure
   `ollama serve` is running (or that the Ollama desktop app is open)
   before answering the condensation-setup prompt.
+- **"LM Studio does not appear to be running"** -- start LM Studio's
+  server (`lms server start`, or the Developer tab in the app).
+- **"... does not fit in the N-token context ... is loaded with" / "...
+  used N tokens, the whole N-token context"** (LM Studio) -- the model is
+  loaded with a context too small for the prompt. Reload it with a larger
+  one, e.g. `lms unload <model>` then
+  `lms load <model> --context-length 32768`.
+- **"WARNING: ... may push the machine into swap"** (LM Studio) -- the
+  chosen model isn't loaded and is larger than the memory free right
+  now. Unload another model (the warning lists what's loaded) or pick a
+  smaller one; answering `y` loads it anyway.
 - **No GPU / CUDA available** -- Phase 1 falls back to CPU automatically
   (prints `Using device: cpu`), just slower. GlossBERT WSD and HDBSCAN
   reclustering are the steps most affected.

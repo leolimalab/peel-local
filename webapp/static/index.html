@@ -237,15 +237,25 @@
           <input type="text" id="rates" name="rates" value="10" placeholder="e.g. 10,20">
         </div>
         <div class="field">
-          <label for="ollama_model">Ollama model
+          <label for="llm_server">LLM server</label>
+          <select id="llm_server" name="llm_server">
+            <option value="ollama">Ollama</option>
+            <option value="lmstudio">LM Studio</option>
+          </select>
+          <p class="hint">The local server that runs the condensation and adversarial-reviewer models below.</p>
+        </div>
+        <div class="field">
+          <label for="ollama_model">Model
             <button type="button" id="refresh-models" class="link-btn">refresh</button>
           </label>
           <select id="ollama_model" name="ollama_model"></select>
+          <p id="ollama_model-memory" class="hint hidden"></p>
           <p id="ollama-status" class="hint"></p>
         </div>
         <div class="field">
           <label for="adversarial_model">Adversarial reviewer model</label>
           <select id="adversarial_model" name="adversarial_model"></select>
+          <p id="adversarial_model-memory" class="hint hidden"></p>
           <p class="hint">Reviews the accepted condensation once more for abrupt endings, garbled text, or drift outside the source material, and fixes it if needed. Defaults to the same model as above.</p>
         </div>
         <div class="field">
@@ -254,7 +264,9 @@
         </div>
 
         <div class="field">
-          <label>Source title / author(s) / date</label>
+          <label>Source title / author(s) / date
+            <button type="button" id="detect-metadata" class="link-btn">detect with AI</button>
+          </label>
           <p id="metadata-status" class="hint">Detecting with AI&hellip;</p>
         </div>
         <div id="metadata-fields" class="grid">

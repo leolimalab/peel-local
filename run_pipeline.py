@@ -32,7 +32,7 @@ from nltk.stem import PorterStemmer
 
 from common.paths import CorpusPaths
 from common.decisions import DecisionLog
-from common import standalone_report, file_convert, parameter_sweep, resume
+from common import standalone_report, file_convert, llm_client, parameter_sweep, resume
 from phase0.clean_corpus import clean_text
 from phase1 import pipeline as phase1_pipeline
 from phase2 import pipeline as phase2_pipeline, condense, condensation_report
@@ -118,10 +118,15 @@ def parse_args():
     # the same interactive prompts phase2.ipynb uses
     # (condense.run_condensation_setup).
     parser.add_argument("--rates", help="Comma-separated condensation rate(s), e.g. '10,20'.")
-    parser.add_argument("--ollama-model", help="Ollama model name.")
+    parser.add_argument("--llm-server", choices=llm_client.SERVERS,
+                         help="Local LLM server for condensation and adversarial review: 'ollama' "
+                              "(default) or 'lmstudio'. Skips the interactive server question.")
+    parser.add_argument("--ollama-model", "--model", dest="ollama_model",
+                         help="Model for condensation, as named by the --llm-server (e.g. 'llama3' "
+                              "for Ollama, 'qwen/qwen3.5-9b' for LM Studio).")
     parser.add_argument("--adversarial-model",
-                         help="Ollama model for the post-generation adversarial reviewer. "
-                              "Defaults to --ollama-model if omitted.")
+                         help="Model for the post-generation adversarial reviewer, on the same "
+                              "--llm-server. Defaults to --ollama-model if omitted.")
     parser.add_argument("--max-trials", type=int, help="Max generation trials per rate before escalation.")
 
     return parser.parse_args()
@@ -158,11 +163,30 @@ def resolve_condensation_config(args, decisions):
     decision log stays a complete record regardless of run mode);
     otherwise falls back to the same interactive prompts phase2.ipynb
     uses. --adversarial-model is optional even in CLI-flags mode --
-    defaults to --ollama-model when omitted."""
+    defaults to --ollama-model when omitted. --llm-server defaults to
+    Ollama in CLI-flags mode (or LM Studio, when --ollama-model already
+    carries the "lmstudio:" prefix); in interactive mode, leaving it out
+    means the server is asked for too."""
     if args.rates and args.ollama_model and args.max_trials:
         rates = [int(r.strip()) for r in args.rates.split(",") if r.strip()]
-        adversarial_model = args.adversarial_model or args.ollama_model
+        server = args.llm_server or llm_client.server_of(args.ollama_model)
+        ollama_model = llm_client.qualify_model(args.ollama_model, server)
+        adversarial_model = llm_client.qualify_model(args.adversarial_model or "", server) or ollama_model
 
+        # The only prompt in CLI-flags mode: an LM Studio model that isn't
+        # loaded and may not fit in free memory still needs a yes before
+        # anything triggers its load.
+        if not condense.confirm_lmstudio_load(ollama_model, decisions, role="generation"):
+            raise SystemExit(f"Stopped: pick another model than '{ollama_model}', or free memory first.")
+        if adversarial_model != ollama_model and not condense.confirm_lmstudio_load(
+                adversarial_model, decisions, role="adversarial_review", unload_first=[ollama_model]):
+            raise SystemExit(f"Stopped: pick another model than '{adversarial_model}', or free memory first.")
+
+        decisions.record(
+            step="condensation_setup", decision_type="llm_server_choice",
+            prompt="Which LLM server would you like to use?",
+            options=list(llm_client.SERVERS), choice=server, extra={"source": "cli"},
+        )
         decisions.record(
             step="condensation_setup", decision_type="rate_selection",
             prompt="What condensation rate(s) would you like? (5-30%)",
@@ -170,12 +194,12 @@ def resolve_condensation_config(args, decisions):
         )
         decisions.record(
             step="condensation_setup", decision_type="ollama_model_choice",
-            prompt="Which Ollama model would you like to use?",
-            choice=args.ollama_model, extra={"source": "cli"},
+            prompt="Which model would you like to use?",
+            choice=ollama_model, extra={"source": "cli"},
         )
         decisions.record(
             step="condensation_setup", decision_type="adversarial_model_choice",
-            prompt="Which Ollama model should the adversarial reviewer use?",
+            prompt="Which model should the adversarial reviewer use?",
             choice=adversarial_model, extra={"source": "cli"},
         )
         decisions.record(
@@ -185,13 +209,19 @@ def resolve_condensation_config(args, decisions):
         )
 
         print(
-            f"\nWill generate condensations at {rates}% using '{args.ollama_model}', "
+            f"\nWill generate condensations at {rates}% using '{ollama_model}', "
             f"up to {args.max_trials} trial(s) each before escalation. Adversarial "
             f"reviewer: '{adversarial_model}'."
         )
-        return rates, args.ollama_model, args.max_trials, adversarial_model
+        return rates, ollama_model, args.max_trials, adversarial_model
 
-    return condense.run_condensation_setup(decisions)
+    if args.llm_server:
+        decisions.record(
+            step="condensation_setup", decision_type="llm_server_choice",
+            prompt="Which LLM server would you like to use?",
+            options=list(llm_client.SERVERS), choice=args.llm_server, extra={"source": "cli"},
+        )
+    return condense.run_condensation_setup(decisions, server=args.llm_server)
 
 
 def run_phase1(args, paths, decisions):
