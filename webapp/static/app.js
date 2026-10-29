@@ -558,13 +558,13 @@ $all(".submit-cluster-review").forEach((btn) => btn.addEventListener("click", su
 function renderPhase2Setup(payload) {
   $("#phase2-summary").textContent =
     `Phase 1 finished with ${payload.cluster_count} cluster(s). State saved to ${payload.phase1_state_path}.`;
-  // Disabled until AI metadata detection (fired by refreshOllamaModels below)
+  // Disabled until AI metadata detection (fired by refreshModels below)
   // settles one way or another -- otherwise a researcher who submits before
   // the (possibly slow) detection call returns locks in blank title/author/
   // date fields as "Unclear" forever, even though the correct answer shows
   // up moments later with nothing left to do with it.
   $("#phase2-submit").disabled = true;
-  refreshOllamaModels();
+  refreshModels();
   showScreen("screen-phase2-setup");
 }
 
@@ -578,11 +578,84 @@ $all("#screen-phase2-setup .yesno-btn").forEach((btn) => {
   });
 });
 
-async function detectMetadata(ollamaModel) {
+// Every model the Phase 2 dropdowns offer, keyed by option value:
+// {backend: "ollama"|"lmstudio", loaded, memory}. `memory` is
+// lmstudio_client.check_memory's result -- only ever not-ok for an LM
+// Studio model that isn't loaded yet (LM Studio loads it on first use).
+let modelInfo = {};
+// Models the researcher already said yes to despite a memory warning, so
+// confirmModelLoad doesn't ask about the same one twice.
+const acknowledgedModels = new Set();
+
+function needsLoad(name) {
+  const info = modelInfo[name];
+  return Boolean(info && info.backend === "lmstudio" && !info.loaded);
+}
+
+// LM Studio models are used one at a time (lmstudio_client.generate
+// unloads the generation model before a different adversarial reviewer
+// loads), so `unloadFirst` -- the generation model, when checking the
+// reviewer -- counts as freed memory if it's loaded.
+function freedBy(name, unloadFirst) {
+  const freed = modelInfo[unloadFirst];
+  return freed && unloadFirst !== name && freed.backend === "lmstudio" && freed.loaded ? freed : null;
+}
+
+function memoryWarning(name, unloadFirst = null) {
+  const info = modelInfo[name];
+  if (!info || !info.memory || info.memory.ok) return null;
+  const freed = freedBy(name, unloadFirst);
+  const m = info.memory;
+  if (freed && m.required_gb + m.headroom_gb <= m.available_gb + freed.size_gb) return null;
+  return m;
+}
+
+// Asks before an LM Studio model that may not fit in free memory gets
+// used -- the first request to it makes LM Studio load it. Returns true
+// to go ahead (always, when there's no warning).
+function confirmModelLoad(name, unloadFirst = null) {
+  const warning = memoryWarning(name, unloadFirst);
+  if (!warning || acknowledgedModels.has(name)) return true;
+  const ok = confirm(`'${name}' is ${warning.message}.\n\nUse this model anyway?`);
+  if (ok) acknowledgedModels.add(name);
+  return ok;
+}
+
+function showModelMemory(selectId) {
+  const name = $(`#${selectId}`).value;
+  const hint = $(`#${selectId}-memory`);
+  const info = modelInfo[name];
+  if (!info || info.backend !== "lmstudio") {
+    hint.classList.add("hidden");
+    return;
+  }
+  const unloadFirst = selectId === "adversarial_model" ? $("#ollama_model").value : null;
+  const warning = memoryWarning(name, unloadFirst);
+  let text = `LM Studio: ${warning ? "Warning -- " : ""}${info.memory.message}.`;
+  if (!info.memory.ok && !warning) {
+    text += ` It fits once '${unloadFirst}' (${freedBy(name, unloadFirst).size_gb} GB) is unloaded, ` +
+      "which happens first -- LM Studio models are used one at a time.";
+  }
+  hint.textContent = text;
+  hint.classList.toggle("warn", Boolean(warning));
+  hint.classList.remove("hidden");
+}
+
+// `auto`: fired by refreshModels rather than by the researcher picking a
+// model -- never allowed to be the thing that makes LM Studio load one.
+async function detectMetadata(ollamaModel, { auto = false } = {}) {
   const statusEl = $("#metadata-status");
   statusEl.classList.remove("error-text");
   if (!ollamaModel) {
-    statusEl.textContent = "Pick an Ollama model above, then AI detection will run automatically.";
+    statusEl.textContent = "Pick a model above, then AI detection will run automatically.";
+    $("#phase2-submit").disabled = false;
+    return;
+  }
+  if (needsLoad(ollamaModel) && (auto || !confirmModelLoad(ollamaModel))) {
+    statusEl.textContent = auto
+      ? `AI detection didn't run automatically: '${ollamaModel}' isn't loaded in LM Studio yet, and ` +
+        "detecting would load it. Click \"detect with AI\" to run it anyway, or fill in the fields below manually."
+      : `AI detection skipped: '${ollamaModel}' was not loaded. Pick another model, or fill in the fields below manually.`;
     $("#phase2-submit").disabled = false;
     return;
   }
@@ -613,51 +686,134 @@ async function detectMetadata(ollamaModel) {
   }
 }
 
-async function refreshOllamaModels() {
-  const statusEl = $("#ollama-status");
-  const select = $("#ollama_model");
-  const adversarialSelect = $("#adversarial_model");
-  statusEl.textContent = "Checking Ollama...";
-  select.innerHTML = "";
-  adversarialSelect.innerHTML = "";
-  try {
-    const data = await api("/api/ollama/models");
-    if (!data.available) {
-      statusEl.textContent = "Ollama does not appear to be running. Install it, pull a model, and start `ollama serve`.";
-      // No Ollama -> detectMetadata will never run -> nothing will ever
-      // lift the disable from renderPhase2Setup unless this does.
-      $("#phase2-submit").disabled = false;
-      return;
-    }
-    if (data.models.length === 0) {
-      statusEl.textContent = "Ollama is running but no models are installed. Run `ollama pull <model>`.";
-      $("#phase2-submit").disabled = false;
-      return;
-    }
-    data.models.forEach((name) => {
-      const opt = document.createElement("option");
-      opt.value = name; opt.textContent = name;
-      select.appendChild(opt);
-
-      const advOpt = document.createElement("option");
-      advOpt.value = name; advOpt.textContent = name;
-      adversarialSelect.appendChild(advOpt);
-    });
-    statusEl.textContent = `Ollama is available -- ${data.models.length} model(s) found.`;
-    detectMetadata(select.value);
-  } catch (err) {
-    statusEl.textContent = `Could not check Ollama: ${err.message}`;
-    // The models fetch itself failed -> detectMetadata will never run.
-    $("#phase2-submit").disabled = false;
-  }
+function modelOptgroup(label, entries) {
+  const group = document.createElement("optgroup");
+  group.label = label;
+  entries.forEach(([value, text]) => {
+    const opt = document.createElement("option");
+    opt.value = value; opt.textContent = text;
+    group.appendChild(opt);
+  });
+  return group;
 }
 
-$("#refresh-models").addEventListener("click", refreshOllamaModels);
-$("#ollama_model").addEventListener("change", (e) => detectMetadata(e.target.value));
+function ollamaStatusText(data) {
+  if (!data.available) return "Ollama does not appear to be running. Install it, pull a model, and start `ollama serve`.";
+  if (data.models.length === 0) return "Ollama is running but no models are installed. Run `ollama pull <model>`.";
+  return `Ollama is available -- ${data.models.length} model(s) found.`;
+}
+
+function lmstudioStatusText(data) {
+  if (!data.available) return "LM Studio is not running (optional) -- start its server with `lms server start` to use its models.";
+  const loaded = data.models.filter((m) => m.loaded).length;
+  return `LM Studio is available -- ${data.models.length} model(s) downloaded, ${loaded} loaded.`;
+}
+
+// Last /api/ollama/models and /api/lmstudio/models responses, so switching
+// the LLM server repopulates the dropdowns without asking again.
+let serverModels = { ollama: null, lmstudio: null };
+
+async function refreshModels() {
+  $("#ollama-status").textContent = "Checking Ollama and LM Studio...";
+  $("#ollama_model").innerHTML = "";
+  $("#adversarial_model").innerHTML = "";
+
+  // Either server is optional on its own -- a failed check just means it
+  // offers no models.
+  const unavailable = (err) => ({ available: false, models: [], error: err.message });
+  const [ollama, lmstudio] = await Promise.all([
+    api("/api/ollama/models").catch(unavailable),
+    api("/api/lmstudio/models").catch(unavailable),
+  ]);
+  serverModels = { ollama, lmstudio };
+  modelInfo = {};
+  ollama.models.forEach((name) => { modelInfo[name] = { backend: "ollama", memory: { ok: true } }; });
+  lmstudio.models.forEach((m) => { modelInfo[m.name] = { backend: "lmstudio", ...m }; });
+
+  // Each option label says whether that server is up, so the choice is
+  // informed; Ollama stays the default unless it's down and LM Studio isn't.
+  const serverSelect = $("#llm_server");
+  serverSelect.options[0].textContent = ollama.available ? "Ollama" : "Ollama (not running)";
+  serverSelect.options[1].textContent = lmstudio.available ? "LM Studio" : "LM Studio (not running)";
+  if (!ollama.available && lmstudio.available) serverSelect.value = "lmstudio";
+  populateModels();
+}
+
+// Fills both model dropdowns with the chosen server's models only.
+function populateModels() {
+  const server = $("#llm_server").value;
+  const data = serverModels[server] || { available: false, models: [] };
+  const select = $("#ollama_model");
+  const adversarialSelect = $("#adversarial_model");
+  select.innerHTML = "";
+  adversarialSelect.innerHTML = "";
+
+  [select, adversarialSelect].forEach((sel) => {
+    if (server === "ollama") {
+      data.models.forEach((name) => {
+        const opt = document.createElement("option");
+        opt.value = name; opt.textContent = name;
+        sel.appendChild(opt);
+      });
+      return;
+    }
+    // Loaded models first, so the default pick (and the automatic
+    // metadata detection it triggers) never makes LM Studio load a model
+    // nobody chose; not-loaded ones after, with their size.
+    const loaded = data.models.filter((m) => m.loaded)
+      .map((m) => [m.name, `${lmstudioKey(m.name)} (loaded, context ${m.context_length} tokens)`]);
+    const notLoaded = data.models.filter((m) => !m.loaded)
+      .map((m) => [m.name, `${lmstudioKey(m.name)} (${m.size_gb} GB${m.memory.ok ? "" : " -- memory warning"})`]);
+    if (loaded.length) sel.appendChild(modelOptgroup("Loaded", loaded));
+    if (notLoaded.length) sel.appendChild(modelOptgroup("Not loaded -- LM Studio loads it on first use", notLoaded));
+  });
+
+  $("#ollama-status").textContent = server === "ollama" ? ollamaStatusText(data) : lmstudioStatusText(data);
+  showModelMemory("ollama_model");
+  showModelMemory("adversarial_model");
+
+  if (!select.value) {
+    // No models on this server -> detectMetadata will never run ->
+    // nothing will ever lift the disable from renderPhase2Setup unless
+    // this does.
+    $("#phase2-submit").disabled = false;
+    return;
+  }
+  detectMetadata(select.value, { auto: true });
+}
+
+function lmstudioKey(name) {
+  return name.replace(/^lmstudio:/, "");
+}
+
+$("#refresh-models").addEventListener("click", refreshModels);
+$("#llm_server").addEventListener("change", populateModels);
+$("#detect-metadata").addEventListener("click", () => detectMetadata($("#ollama_model").value));
+$("#ollama_model").addEventListener("change", (e) => {
+  showModelMemory("ollama_model");
+  showModelMemory("adversarial_model");
+  detectMetadata(e.target.value);
+});
+$("#adversarial_model").addEventListener("change", () => showModelMemory("adversarial_model"));
 
 $("#phase2-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const runCondensation = $("#run_condensation").value === "true";
+  // Last chance to back out of loading an LM Studio model that may not
+  // fit in free memory; every one kept despite a warning goes into the
+  // decision log (pipeline_session.apply_phase2_setup).
+  const memoryWarnings = [];
+  if (runCondensation) {
+    const generation = $("#ollama_model").value;
+    const adversarial = $("#adversarial_model").value;
+    const checks = [[generation, "generation", null]];
+    if (adversarial !== generation) checks.push([adversarial, "adversarial_review", generation]);
+    for (const [model, role, unloadFirst] of checks) {
+      if (!confirmModelLoad(model, unloadFirst)) return;
+      const warning = memoryWarning(model, unloadFirst);
+      if (warning) memoryWarnings.push({ model, role, ...warning });
+    }
+  }
   try {
     await api("/api/decisions/phase2-setup", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -666,9 +822,11 @@ $("#phase2-form").addEventListener("submit", async (e) => {
         density_percentile: parseFloat($("#density_percentile").value),
         run_condensation: runCondensation,
         rates: $("#rates").value,
+        llm_server: $("#llm_server").value,
         ollama_model: $("#ollama_model").value,
         adversarial_model: $("#adversarial_model").value,
         max_trials: parseInt($("#max_trials").value, 10),
+        memory_warnings: memoryWarnings,
         title: $("#source_title").value,
         authors: $("#source_authors").value,
         date: $("#source_date").value,
