@@ -108,7 +108,12 @@ Origem dos pedidos:
 ## Fork no GitHub (2026-10-29)
 
 - A pedido do usuário, foi criado o fork `leolimalab/peel-local` (https://github.com/leolimalab/peel-local), público como o original `PUC-Behring-AI/peel-local`, com `gh repo fork --clone=false --remote=false`.
-- O fork tem só o que já estava no GitHub (`main` do original). Os remotes do repositório local não foram alterados, e o trabalho da branch `feature/lmstudio` segue sem commit e sem push.
+- No primeiro momento, o fork tinha só o que já estava no GitHub (`main` do original).
+- Depois, a pedido do usuário ("adicione o fork como remote e envie a branch para lá. Não abra PR para o repo original"):
+  - o fork virou o remote `fork` (`https://github.com/leolimalab/peel-local.git`); o `origin` continua sendo o `PUC-Behring-AI`;
+  - a `feature/lmstudio` foi enviada com `git push -u fork feature/lmstudio`, em dois commits: `bf4c895` (LM Studio) e `4649483` (`Atualizações/` e `.gitignore`);
+  - **nenhum PR foi aberto**.
+- **Ficou fora dos commits:** as alterações em `data/` feitas pelas execuções de teste do usuário nos textos de exemplo `Boisseau-qwen9b-25cond-10informativesents` e `-20informativesents`. Elas sobrescrevem saídas de exemplo versionadas (o `informative_sentences.json` do `-20informativesents` perdeu 632 linhas), então continuam só na máquina local, sem commit e sem descarte.
 
 ## Issues remanescentes
 
