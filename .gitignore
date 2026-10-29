@@ -1,6 +1,8 @@
 __pycache__/
 *.pyc
 
+.venv/
+
 .ipynb_checkpoints/
 
 # GlossBERT is now fetched from the Hugging Face Hub (jvomiranda/GlossBERT_Checkpoint);
