@@ -118,6 +118,11 @@ Origem dos pedidos:
   - `main` e `feature/lmstudio` acompanham `origin/main` e `origin/feature/lmstudio`;
   - nenhum remote ou configuração do git aponta mais para o `PUC-Behring-AI`.
   - No GitHub, o `leolimalab/peel-local` continua marcado como fork de `PUC-Behring-AI/peel-local`. Desfazer esse vínculo de rede é coisa do GitHub (Suporte) e não foi feito.
+- **Para não atrapalhar o repositório original:** o usuário disse "nao quero 'atrapalhar' repo original a cada push, PR ou outra alteração que eu fizer".
+  - Os pushes já iam só para o fork.
+  - O risco que restava era o destino padrão de PRs e issues: sem um repositório padrão definido, o `gh pr create` num fork propõe o original. Foi aplicado `gh repo set-default leolimalab/peel-local`, que grava `remote.origin.gh-resolved = base`, e o `gh` passou a resolver PRs e issues contra o fork.
+  - A regra ficou registrada na memória de projeto do Claude Code (`never-touch-upstream-repo`).
+  - Continua dependendo do usuário: o botão "Compare & pull request" do site do GitHub ainda propõe o original como destino enquanto o fork estiver na rede de forks.
 - **Ficou fora dos commits:** as alterações em `data/` feitas pelas execuções de teste do usuário nos textos de exemplo `Boisseau-qwen9b-25cond-10informativesents` e `-20informativesents`. Elas sobrescrevem saídas de exemplo versionadas (o `informative_sentences.json` do `-20informativesents` perdeu 632 linhas), então continuam só na máquina local, sem commit e sem descarte.
 
 ## Issues remanescentes
