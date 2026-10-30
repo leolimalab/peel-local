@@ -125,6 +125,28 @@ Origem dos pedidos:
   - Continua dependendo do usuário: o botão "Compare & pull request" do site do GitHub ainda propõe o original como destino enquanto o fork estiver na rede de forks.
 - **Ficou fora dos commits:** as alterações em `data/` feitas pelas execuções de teste do usuário nos textos de exemplo `Boisseau-qwen9b-25cond-10informativesents` e `-20informativesents`. Elas sobrescrevem saídas de exemplo versionadas (o `informative_sentences.json` do `-20informativesents` perdeu 632 linhas), então continuam só na máquina local, sem commit e sem descarte.
 
+## Estado ao fim da sessão (2026-10-30T11:50)
+
+- **Git:**
+  - branch `feature/lmstudio`, sincronizada com `origin/feature/lmstudio`, em `leolimalab/peel-local`;
+  - **PR #1**, aberto pelo usuário no próprio fork (https://github.com/leolimalab/peel-local/pull/1), destino `main`, pode ser mesclado sem conflito, descrição vazia;
+  - no repositório original, nenhum PR, issue ou push.
+- **Fora do git:** as saídas das execuções de teste do usuário em `data/Boisseau-qwen9b-25cond-10informativesents/` e `data/Boisseau-qwen9b-25cond-20informativesents/` (7 arquivos alterados e 14 novos de resumos a 10%). O usuário ainda não decidiu se entram num commit ou se os originais são restaurados.
+- **Processos:**
+  - a interface web (porta 5001) e o `ollama serve` foram encerrados a pedido do usuário;
+  - o servidor do LM Studio (porta 1234) e o ai-memory continuam ligados, porque não foram abertos como shells desta sessão e o ai-memory depende do LM Studio;
+  - nenhum modelo carregado, nem no LM Studio nem no Ollama.
+- **Para retomar a interface web neste Mac** (o `app.py` fixa a porta 5000, ocupada pelo AirPlay):
+
+  ```bash
+  cd "/Users/leonardolima/16. Peel-local/peel-local"
+  SSL_CERT_FILE="$(.venv/bin/python -c 'import certifi;print(certifi.where())')" \
+    .venv/bin/python -c "from webapp.app import app; app.run(host='127.0.0.1', port=5001, threaded=True)"
+  ```
+
+  O Ollama sobe com `ollama serve`, se for usado.
+- **Testes de apoio:** ficaram na pasta temporária da sessão, fora do repositório: `test_lmstudio.py`, `test_server_choice.py`, `test_one_at_a_time.py` e `real_swap_test.py`.
+
 ## Issues remanescentes
 
 - **Não testados de verdade:** o carregamento sob demanda (envio de `context_length` e leitura do contexto obtido) e o comportamento do LM Studio ao estourar o contexto (corta ou dá erro). Ambos foram só simulados, porque testá-los exigiria carregar outro modelo.
